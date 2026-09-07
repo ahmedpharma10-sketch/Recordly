@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import shutil
 import time
 import urllib.request
@@ -100,13 +99,17 @@ async def main() -> int:
               const b=document.querySelector('button[title="Record"]');
               if(!b) throw new Error('Record button missing');
               b.click();
-              await new Promise(r=>setTimeout(r,1800));
-              return (document.body.innerText||'').slice(0,500);
+              await new Promise(r=>setTimeout(r,5500));
+              return {
+                text:(document.body.innerText||'').slice(0,500),
+                hasStop:!!document.querySelector('button[title="Stop"]'),
+                hasPause:!!document.querySelector('button[title="Pause"]')
+              };
             })()
         """)
-        print("AFTER_START=" + repr(state))
-        if "REC" not in str(state):
-            raise RuntimeError("Recordly did not enter recording state")
+        print("AFTER_START=" + json.dumps(state, ensure_ascii=False))
+        if not state or (not state.get("hasStop") and "REC" not in str(state.get("text", ""))):
+            raise RuntimeError("Recordly did not enter recording state after countdown")
 
         await asyncio.sleep(max(3.0, args.duration))
         try:
