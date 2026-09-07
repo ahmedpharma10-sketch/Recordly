@@ -79,7 +79,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          ./squashfs-root/AppRun \
+          APPDIR="$PWD/squashfs-root" ./squashfs-root/AppRun \
             --no-sandbox \
             --remote-debugging-port=9333 \
             >canary-logs/recordly.log 2>&1 &
