@@ -1,0 +1,129 @@
+name: Recordly GitHub Recording Canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: Public app URL to record
+        required: true
+        default: https://ahmedpharma10-sketch.github.io/matter-live-production-dashboard/
+      duration_seconds:
+        description: Recording duration
+        required: true
+        default: '8'
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DISPLAY: ':99'
+      XDG_RUNTIME_DIR: /tmp/recordly-xdg-runtime
+      RECORDLY_TAG: v1.4.0-beta.1
+    steps:
+      - name: Checkout Recordly fork
+        uses: actions/checkout@v4
+
+      - name: Prepare virtual desktop
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb ffmpeg
+          mkdir -p "$XDG_RUNTIME_DIR" canary-logs canary-artifacts
+          chmod 700 "$XDG_RUNTIME_DIR"
+          Xvfb "$DISPLAY" -screen 0 1280x720x24 -ac +extension RANDR >canary-logs/xvfb.log 2>&1 &
+          echo $! > canary-logs/xvfb.pid
+          sleep 2
+          xdpyinfo -display "$DISPLAY" | head -20
+
+      - name: Open GitHub Pages app
+        shell: bash
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+        run: |
+          set -euxo pipefail
+          CHROME_BIN="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)"
+          "$CHROME_BIN" \
+            --no-sandbox \
+            --disable-dev-shm-usage \
+            --disable-gpu \
+            --window-size=1200,680 \
+            --app="$TARGET_URL" \
+            >canary-logs/chrome.log 2>&1 &
+          echo $! > canary-logs/chrome.pid
+          sleep 5
+          curl --fail --location --silent --show-error "$TARGET_URL" -o canary-logs/target.html
+          grep -i '<title' canary-logs/target.html | head -1 || true
+
+      - name: Download and verify official Recordly Linux build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BASE="https://github.com/webadderallorg/Recordly/releases/download/$RECORDLY_TAG"
+          curl --fail --location --retry 3 -o Recordly-linux-x64.AppImage "$BASE/Recordly-linux-x64.AppImage"
+          curl --fail --location --retry 3 -o SHA256SUMS.txt "$BASE/SHA256SUMS.txt"
+          grep 'Recordly-linux-x64.AppImage' SHA256SUMS.txt | sha256sum -c -
+          chmod +x Recordly-linux-x64.AppImage
+          ./Recordly-linux-x64.AppImage --appimage-extract >canary-logs/appimage-extract.log
+
+      - name: Launch Recordly in virtual desktop
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ./squashfs-root/AppRun \
+            --no-sandbox \
+            --remote-debugging-port=9333 \
+            >canary-logs/recordly.log 2>&1 &
+          echo $! > canary-logs/recordly.pid
+          for i in $(seq 1 40); do
+            if curl --fail --silent http://127.0.0.1:9333/json > canary-logs/cdp-targets.json; then
+              break
+            fi
+            sleep 1
+          done
+          test -s canary-logs/cdp-targets.json
+          cat canary-logs/cdp-targets.json
+
+      - name: Drive Recordly and record the app
+        shell: bash
+        env:
+          DURATION_SECONDS: ${{ inputs.duration_seconds }}
+        run: |
+          set -euxo pipefail
+          python3 -m pip install --disable-pip-version-check websockets
+          python3 scripts/github-recording-canary.py \
+            --port 9333 \
+            --duration "$DURATION_SECONDS" \
+            --output canary-artifacts/recordly-github-canary.webm \
+            | tee canary-logs/controller.log
+
+      - name: Verify recording artifact
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if test -f canary-artifacts/recordly-github-canary.webm; then
+            sha256sum canary-artifacts/recordly-github-canary.webm | tee canary-artifacts/SHA256SUMS.txt
+            ffprobe -v error \
+              -show_entries format=duration,size,format_name \
+              -show_entries stream=index,codec_name,codec_type,width,height,r_frame_rate,avg_frame_rate \
+              -of json canary-artifacts/recordly-github-canary.webm \
+              | tee canary-artifacts/ffprobe.json
+          fi
+          cp canary-sources.json canary-logs/canary-sources.json 2>/dev/null || true
+          find "$HOME/.config" -maxdepth 4 -type f \( -name '*.webm' -o -name '*.json' \) -printf '%p %s bytes\n' 2>/dev/null | sort > canary-logs/recordly-files.txt || true
+
+      - name: Upload canary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recordly-github-recording-canary
+          path: |
+            canary-artifacts/
+            canary-logs/
+          if-no-files-found: warn
+          retention-days: 7
